@@ -1,0 +1,103 @@
+syntax = "proto3";
+package cosmos.nft.v1beta1;
+
+option go_package = "github.com/cosmos/cosmos-sdk/x/nft";
+
+import "cosmos/nft/v1beta1/nft.proto";
+import "gogoproto/gogo.proto";
+
+
+// Msg defines the nft Msg service.
+service Msg {
+  // Send defines a method to send a nft from one account to another account.
+  rpc Send(MsgSend) returns (MsgSendResponse);
+  // Burn defines a method to burn a nft from one account
+  rpc Burn(MsgBurn) returns (MsgBurnResponse);
+  // Mint defines a method to mint a nft from one account to another account
+  rpc Mint(MsgMint) returns (MsgMintResponse);
+  // Update defines a method to update a nft from one account
+  rpc Update(MsgUpdate) returns (MsgUpdateResponse);
+  // Issue defines a method to issue a new class of nft from one account 
+  rpc Issue(MsgIssue) returns (MsgIssueResponse);
+}
+
+// MsgSend represents a message to send a nft from one account to another account.
+message MsgSend {
+  option (gogoproto.equal)           = false;
+  option (gogoproto.goproto_getters) = false;
+
+  // from_address is the address of the owner of nft
+  string   from_address                    = 1 [(gogoproto.moretags) = "yaml:\"from_address\""];
+  // to_address is the receiver address of nft
+  string   to_address                      = 2 [(gogoproto.moretags) = "yaml:\"to_address\""];
+  // class_id defines the unique identifier of the nft classification, similar to the contract address of ERC721
+  string class_id = 3;
+
+  // id defines the unique identification of nft
+  string id = 4;
+}
+
+// MsgSendResponse defines the Msg/Send response type.
+message MsgSendResponse {}
+
+// MsgSend represents a message to burn a nft
+message MsgBurn {
+  option (gogoproto.equal)           = false;
+  option (gogoproto.goproto_getters) = false;
+
+  // from_address is the address of the owner of nft
+  string   from_address                    = 1 [(gogoproto.moretags) = "yaml:\"from_address\""];
+  // class_id defines the unique identifier of the nft classification, similar to the contract address of ERC721
+  string class_id = 2;
+  // id defines the unique identification of nft
+  string id = 3;
+}
+
+// MsgSendResponse defines the Msg/Burn response type.
+message MsgBurnResponse {}
+
+// MsgSend represents a message to mint a nft
+message MsgMint {
+  option (gogoproto.equal)           = false;
+  option (gogoproto.goproto_getters) = false;
+
+  // from_address is the address of the owner of nft
+  string   from_address                    = 1 [(gogoproto.moretags) = "yaml:\"from_address\""];
+  // to_address is the receiver address of nft 
+  string   to_address                      = 2 [(gogoproto.moretags) = "yaml:\"to_address\""];
+  // nft to be minted
+  cosmos.nft.v1beta1.NFT nft = 3;
+}
+
+// MsgMint defines the Msg/Mint response type.
+message MsgMintResponse {}
+
+message MsgIssue {
+  option (gogoproto.equal)           = false;
+  option (gogoproto.goproto_getters) = false;
+
+  // from_address is the address of the owner of nft
+  string   from_address                    = 1 [(gogoproto.moretags) = "yaml:\"from_address\""];
+  // nft to be minted
+  cosmos.nft.v1beta1.Class class = 2;
+}
+
+message MsgIssueResponse {}
+
+
+
+// MsgUpdate represents a message to update a nft
+message MsgUpdate {
+  option (gogoproto.equal)           = false;
+  option (gogoproto.goproto_getters) = false;
+
+  // from_address is the address of the owner of nft
+  string    from_address     = 1;
+
+  // nft to be minted
+  cosmos.nft.v1beta1.NFT nft = 2;
+}
+
+// MsgUpdate defines the Msg/Update response type
+
+message MsgUpdateResponse {}
