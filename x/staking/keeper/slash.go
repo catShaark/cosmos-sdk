@@ -89,12 +89,13 @@ func (k Keeper) Slash(ctx sdk.Context, consAddr sdk.ConsAddress, infractionHeigh
 	case infractionHeight < ctx.BlockHeight():
 		// Iterate through unbonding delegations from slashed validator
 		unbondingDelegations := k.GetUnbondingDelegationsFromValidator(ctx, operatorAddress)
+		fmt.Println(unbondingDelegations, "unbondingdel")
 		for _, unbondingDelegation := range unbondingDelegations {
 			amountSlashed := k.SlashUnbondingDelegation(ctx, unbondingDelegation, infractionHeight, slashFactor)
 			if amountSlashed.IsZero() {
 				continue
 			}
-
+			fmt.Println(amountSlashed, "slashed")
 			remainingSlashAmount = remainingSlashAmount.Sub(amountSlashed)
 		}
 
@@ -183,6 +184,8 @@ func (k Keeper) SlashUnbondingDelegation(ctx sdk.Context, unbondingDelegation ty
 	for i, entry := range unbondingDelegation.Entries {
 		// If unbonding started before this height, stake didn't contribute to infraction
 		if entry.CreationHeight < infractionHeight {
+			fmt.Println(entry.CreationHeight)
+			fmt.Println(infractionHeight)
 			continue
 		}
 

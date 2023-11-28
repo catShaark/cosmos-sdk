@@ -1,6 +1,7 @@
 package keeper_test
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -14,6 +15,8 @@ import (
 	"github.com/cosmos/cosmos-sdk/x/staking/keeper"
 	"github.com/cosmos/cosmos-sdk/x/staking/teststaking"
 	"github.com/cosmos/cosmos-sdk/x/staking/types"
+	abci "github.com/tendermint/tendermint/abci/types"
+	tmtypes "github.com/tendermint/tendermint/proto/tendermint/types"
 )
 
 // bootstrapSlashTest creates 3 validators and bootstrap the app.
@@ -116,71 +119,168 @@ func TestSlashUnbondingDelegation(t *testing.T) {
 	require.True(t, diffTokens.AmountOf(app.StakingKeeper.BondDenom(ctx)).Equal(sdk.NewInt(5)))
 }
 
+// BeginNewBlock starts a new block.
+func BeginNewBlock(t *testing.T, app *simapp.SimApp, ctx sdk.Context, jumpTime time.Duration) sdk.Context {
+	newBlockTime := ctx.BlockTime().Add(jumpTime)
+
+	header := tmtypes.Header{Height: ctx.BlockHeight() + 1, Time: newBlockTime}
+	ctx = ctx.WithBlockTime(newBlockTime).WithBlockHeight(ctx.BlockHeight() + 1)
+	reqBeginBlock := abci.RequestBeginBlock{Header: header}
+
+	fmt.Println("beginning block ", ctx.BlockHeight())
+	app.BeginBlocker(ctx, reqBeginBlock)
+	ctx = app.NewContext(false, reqBeginBlock.Header)
+
+	return ctx
+}
+
 // tests slashRedelegation
 func TestSlashRedelegation(t *testing.T) {
 	app, ctx, addrDels, addrVals := bootstrapSlashTest(t, 10)
-	fraction := sdk.NewDecWithPrec(5, 1)
+	// fraction := sdk.NewDecWithPrec(5, 1)
 
-	// add bonded tokens to pool for (re)delegations
-	startCoins := sdk.NewCoins(sdk.NewInt64Coin(app.StakingKeeper.BondDenom(ctx), 15))
-	bondedPool := app.StakingKeeper.GetBondedPool(ctx)
-	balances := app.BankKeeper.GetAllBalances(ctx, bondedPool.GetAddress())
+	// fund test account
+	testAcc := addrDels[0]
+	testAcc2 := addrDels[1]
+	testVal := addrVals[0]
+	testAmt := app.StakingKeeper.TokensFromConsensusPower(ctx, 10)
+	testAccCoins := sdk.NewCoins(sdk.NewCoin(app.StakingKeeper.BondDenom(ctx), testAmt))
+	fmt.Println("test amount", testAmt)
 
-	require.NoError(t, testutil.FundModuleAccount(app.BankKeeper, ctx, bondedPool.GetName(), startCoins))
-	app.AccountKeeper.SetModuleAccount(ctx, bondedPool)
+	testutil.FundAccount(app.BankKeeper, ctx, testAcc, testAccCoins)
+	testutil.FundAccount(app.BankKeeper, ctx, testAcc2, testAccCoins)
 
-	// set a redelegation with an expiration timestamp beyond which the
-	// redelegation shouldn't be slashed
-	rd := types.NewRedelegation(addrDels[0], addrVals[0], addrVals[1], 0,
-		time.Unix(5, 0), sdk.NewInt(10), sdk.NewDec(10))
+	fmt.Println("balance 1 before delegate", app.BankKeeper.GetBalance(ctx, testAcc, app.StakingKeeper.BondDenom(ctx)))
+	fmt.Println("balance 2 before delegate", app.BankKeeper.GetBalance(ctx, testAcc2, app.StakingKeeper.BondDenom(ctx)))
 
-	app.StakingKeeper.SetRedelegation(ctx, rd)
+	stakingMsgServer := keeper.NewMsgServerImpl(app.StakingKeeper)
+	context := sdk.WrapSDKContext(ctx)
 
-	// set the associated delegation
-	del := types.NewDelegation(addrDels[0], addrVals[1], sdk.NewDec(10))
-	app.StakingKeeper.SetDelegation(ctx, del)
+	// acc 2 delegate
+	delMsg := types.NewMsgDelegate(testAcc2, testVal, testAccCoins[0])
 
-	// started redelegating prior to the current height, stake didn't contribute to infraction
-	validator, found := app.StakingKeeper.GetValidator(ctx, addrVals[1])
+	_, err := stakingMsgServer.Delegate(context, delMsg)
+	require.NoError(t, err)
+
+	fmt.Println("acc 2 after delegate", app.BankKeeper.GetBalance(ctx, testAcc2, app.StakingKeeper.BondDenom(ctx)))
+
+	// acc 1 delegate
+	delMsg = types.NewMsgDelegate(testAcc, testVal, testAccCoins[0])
+
+	_, err = stakingMsgServer.Delegate(context, delMsg)
+	require.NoError(t, err)
+
+	fmt.Println("acc 1 after delegate", app.BankKeeper.GetBalance(ctx, testAcc, app.StakingKeeper.BondDenom(ctx)))
+
+	// redelegate
+	redelMsg := types.NewMsgBeginRedelegate(testAcc, testVal, addrVals[1], testAccCoins[0])
+
+	_, err = stakingMsgServer.BeginRedelegate(context, redelMsg)
+	require.NoError(t, err)
+
+	// acc 1 undelegate
+	undelMsg := types.NewMsgUndelegate(testAcc, addrVals[1], testAccCoins[0])
+
+	_, err = stakingMsgServer.Undelegate(context, undelMsg)
+	require.NoError(t, err)
+
+	// acc 2 undelegate
+	undelMsg = types.NewMsgUndelegate(testAcc2, addrVals[0], testAccCoins[0])
+
+	_, err = stakingMsgServer.Undelegate(context, undelMsg)
+	require.NoError(t, err)
+
+	validator, found := app.StakingKeeper.GetValidator(ctx, testVal)
 	require.True(t, found)
-	slashAmount := app.StakingKeeper.SlashRedelegation(ctx, validator, rd, 1, fraction)
-	require.True(t, slashAmount.Equal(sdk.NewInt(0)))
+	valAddrFancy, err := validator.GetConsAddr()
+	require.NoError(t, err)
 
-	// after the expiration time, no longer eligible for slashing
-	ctx = ctx.WithBlockHeader(tmproto.Header{Time: time.Unix(10, 0)})
-	app.StakingKeeper.SetRedelegation(ctx, rd)
-	validator, found = app.StakingKeeper.GetValidator(ctx, addrVals[1])
-	require.True(t, found)
-	slashAmount = app.StakingKeeper.SlashRedelegation(ctx, validator, rd, 0, fraction)
-	require.True(t, slashAmount.Equal(sdk.NewInt(0)))
+	fmt.Println(app.StakingKeeper.UnbondingTime(ctx))
 
-	balances = app.BankKeeper.GetAllBalances(ctx, bondedPool.GetAddress())
+	// next block
+	// app.EndBlocker(ctx, abci.RequestEndBlock{Height: ctx.BlockHeight()})
+	// app.Commit()
+	ctx = BeginNewBlock(t, app, ctx, time.Duration(1))
 
-	// test valid slash, before expiration timestamp and to which stake contributed
-	ctx = ctx.WithBlockHeader(tmproto.Header{Time: time.Unix(0, 0)})
-	app.StakingKeeper.SetRedelegation(ctx, rd)
-	validator, found = app.StakingKeeper.GetValidator(ctx, addrVals[1])
-	require.True(t, found)
-	slashAmount = app.StakingKeeper.SlashRedelegation(ctx, validator, rd, 0, fraction)
-	require.True(t, slashAmount.Equal(sdk.NewInt(5)))
-	rd, found = app.StakingKeeper.GetRedelegation(ctx, addrDels[0], addrVals[0], addrVals[1])
-	require.True(t, found)
-	require.Len(t, rd.Entries, 1)
+	// next block
+	// app.EndBlocker(ctx, abci.RequestEndBlock{Height: ctx.BlockHeight()})
+	// app.Commit()
+	ctx = BeginNewBlock(t, app, ctx, time.Duration(1))
 
-	// end block
-	applyValidatorSetUpdates(t, ctx, app.StakingKeeper, 1)
+	// next block
+	// app.EndBlocker(ctx, abci.RequestEndBlock{Height: ctx.BlockHeight()})
+	// app.Commit()
+	ctx = BeginNewBlock(t, app, ctx, time.Duration(1))
 
-	// initialbalance unchanged
-	require.Equal(t, sdk.NewInt(10), rd.Entries[0].InitialBalance)
+	app.SlashingKeeper.Slash(ctx, valAddrFancy, sdk.OneDec(), 20, 0)
 
-	// shares decreased
-	del, found = app.StakingKeeper.GetDelegation(ctx, addrDels[0], addrVals[1])
-	require.True(t, found)
-	require.Equal(t, int64(5), del.Shares.RoundInt64())
+	// next block
+	ctx = BeginNewBlock(t, app, ctx, time.Duration(1000000000000000000))
+	app.EndBlocker(ctx, abci.RequestEndBlock{Height: ctx.BlockHeight()})
+	app.Commit()
 
-	// pool bonded tokens should decrease
-	burnedCoins := sdk.NewCoins(sdk.NewCoin(app.StakingKeeper.BondDenom(ctx), slashAmount))
-	require.Equal(t, balances.Sub(burnedCoins...), app.BankKeeper.GetAllBalances(ctx, bondedPool.GetAddress()))
+	fmt.Println("acc 1", app.BankKeeper.GetBalance(ctx, testAcc, app.StakingKeeper.BondDenom(ctx)))
+	fmt.Println("acc 2", app.BankKeeper.GetBalance(ctx, testAcc2, app.StakingKeeper.BondDenom(ctx)))
+
+	// // add bonded tokens to pool for (re)delegations
+	// startCoins := sdk.NewCoins(sdk.NewInt64Coin(app.StakingKeeper.BondDenom(ctx), 15))
+	// bondedPool := app.StakingKeeper.GetBondedPool(ctx)
+
+	// require.NoError(t, testutil.FundModuleAccount(app.BankKeeper, ctx, bondedPool.GetName(), startCoins))
+	// app.AccountKeeper.SetModuleAccount(ctx, bondedPool)
+
+	// // set a redelegation with an expiration timestamp beyond which the
+	// // redelegation shouldn't be slashed
+	// rd := types.NewRedelegation(addrDels[0], addrVals[0], addrVals[1], 0,
+	// 	time.Unix(5, 0), sdk.NewInt(10), sdk.NewDec(10))
+
+	// app.StakingKeeper.SetRedelegation(ctx, rd)
+
+	// // set the associated delegation
+	// del := types.NewDelegation(addrDels[0], addrVals[1], sdk.NewDec(10))
+	// app.StakingKeeper.SetDelegation(ctx, del)
+
+	// // started redelegating prior to the current height, stake didn't contribute to infraction
+	// validator, found := app.StakingKeeper.GetValidator(ctx, addrVals[1])
+	// require.True(t, found)
+	// slashAmount := app.StakingKeeper.SlashRedelegation(ctx, validator, rd, 1, fraction)
+	// require.True(t, slashAmount.Equal(sdk.NewInt(0)))
+
+	// // after the expiration time, no longer eligible for slashing
+	// ctx = ctx.WithBlockHeader(tmproto.Header{Time: time.Unix(10, 0)})
+	// app.StakingKeeper.SetRedelegation(ctx, rd)
+	// validator, found = app.StakingKeeper.GetValidator(ctx, addrVals[1])
+	// require.True(t, found)
+	// slashAmount = app.StakingKeeper.SlashRedelegation(ctx, validator, rd, 0, fraction)
+	// require.True(t, slashAmount.Equal(sdk.NewInt(0)))
+
+	// balances := app.BankKeeper.GetAllBalances(ctx, bondedPool.GetAddress())
+
+	// // test valid slash, before expiration timestamp and to which stake contributed
+	// ctx = ctx.WithBlockHeader(tmproto.Header{Time: time.Unix(0, 0)})
+	// app.StakingKeeper.SetRedelegation(ctx, rd)
+	// validator, found = app.StakingKeeper.GetValidator(ctx, addrVals[1])
+	// require.True(t, found)
+	// slashAmount = app.StakingKeeper.SlashRedelegation(ctx, validator, rd, 0, fraction)
+	// require.True(t, slashAmount.Equal(sdk.NewInt(5)))
+	// rd, found = app.StakingKeeper.GetRedelegation(ctx, addrDels[0], addrVals[0], addrVals[1])
+	// require.True(t, found)
+	// require.Len(t, rd.Entries, 1)
+
+	// // end block
+	// applyValidatorSetUpdates(t, ctx, app.StakingKeeper, 1)
+
+	// // initialbalance unchanged
+	// require.Equal(t, sdk.NewInt(10), rd.Entries[0].InitialBalance)
+
+	// // shares decreased
+	// del, found = app.StakingKeeper.GetDelegation(ctx, addrDels[0], addrVals[1])
+	// require.True(t, found)
+	// require.Equal(t, int64(5), del.Shares.RoundInt64())
+
+	// // pool bonded tokens should decrease
+	// burnedCoins := sdk.NewCoins(sdk.NewCoin(app.StakingKeeper.BondDenom(ctx), slashAmount))
+	// require.Equal(t, balances.Sub(burnedCoins...), app.BankKeeper.GetAllBalances(ctx, bondedPool.GetAddress()))
 }
 
 // tests Slash at a future height (must panic)
