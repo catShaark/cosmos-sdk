@@ -136,81 +136,71 @@ func BeginNewBlock(t *testing.T, app *simapp.SimApp, ctx sdk.Context, jumpTime t
 
 // tests slashRedelegation
 func TestSlashRedelegation(t *testing.T) {
+	// setting up
 	app, ctx, addrDels, addrVals := bootstrapSlashTest(t, 10)
-	// fraction := sdk.NewDecWithPrec(5, 1)
-
-	// fund test account
-	testAcc := addrDels[0]
-	testAcc2 := addrDels[1]
-	testVal := addrVals[0]
-	testAmt := app.StakingKeeper.TokensFromConsensusPower(ctx, 10)
-	testAccCoins := sdk.NewCoins(sdk.NewCoin(app.StakingKeeper.BondDenom(ctx), testAmt))
-	fmt.Println("test amount", testAmt)
-
-	testutil.FundAccount(app.BankKeeper, ctx, testAcc, testAccCoins)
-	testutil.FundAccount(app.BankKeeper, ctx, testAcc2, testAccCoins)
-
-	fmt.Println("balance 1 before delegate", app.BankKeeper.GetBalance(ctx, testAcc, app.StakingKeeper.BondDenom(ctx)))
-	fmt.Println("balance 2 before delegate", app.BankKeeper.GetBalance(ctx, testAcc2, app.StakingKeeper.BondDenom(ctx)))
-
 	stakingMsgServer := keeper.NewMsgServerImpl(app.StakingKeeper)
 	context := sdk.WrapSDKContext(ctx)
 
-	// acc 2 delegate
-	delMsg := types.NewMsgDelegate(testAcc2, testVal, testAccCoins[0])
+	// acc 1 will use the trick to escape slashing
+	// acc 2 will undelegate like normal
+	testAcc1 := addrDels[0]
+	testAcc2 := addrDels[1]
+
+	evilVal := addrVals[0]
+	goodVal := addrVals[1]
+
+	testAmt := app.StakingKeeper.TokensFromConsensusPower(ctx, 10)
+	testCoins := sdk.NewCoins(sdk.NewCoin(app.StakingKeeper.BondDenom(ctx), testAmt))
+
+	testutil.FundAccount(app.BankKeeper, ctx, testAcc1, testCoins)
+	testutil.FundAccount(app.BankKeeper, ctx, testAcc2, testCoins)
+
+	acc1BalanceBefore := app.BankKeeper.GetBalance(ctx, testAcc1, app.StakingKeeper.BondDenom(ctx))
+	acc2BalanceBefore := app.BankKeeper.GetBalance(ctx, testAcc2, app.StakingKeeper.BondDenom(ctx))
+
+	// height 0
+	// acc 1 delegate
+	delMsg := types.NewMsgDelegate(testAcc1, evilVal, testCoins[0])
 
 	_, err := stakingMsgServer.Delegate(context, delMsg)
 	require.NoError(t, err)
 
-	fmt.Println("acc 2 after delegate", app.BankKeeper.GetBalance(ctx, testAcc2, app.StakingKeeper.BondDenom(ctx)))
-
-	// acc 1 delegate
-	delMsg = types.NewMsgDelegate(testAcc, testVal, testAccCoins[0])
+	// acc 2 delegate
+	delMsg = types.NewMsgDelegate(testAcc2, evilVal, testCoins[0])
 
 	_, err = stakingMsgServer.Delegate(context, delMsg)
 	require.NoError(t, err)
 
-	fmt.Println("acc 1 after delegate", app.BankKeeper.GetBalance(ctx, testAcc, app.StakingKeeper.BondDenom(ctx)))
+	// next block
+	ctx = BeginNewBlock(t, app, ctx, time.Duration(1))
 
-	// redelegate
-	redelMsg := types.NewMsgBeginRedelegate(testAcc, testVal, addrVals[1], testAccCoins[0])
+	// height 1
+	// acc 1 redelegate
+	redelMsg := types.NewMsgBeginRedelegate(testAcc1, evilVal, goodVal, testCoins[0])
 
 	_, err = stakingMsgServer.BeginRedelegate(context, redelMsg)
 	require.NoError(t, err)
 
 	// acc 1 undelegate
-	undelMsg := types.NewMsgUndelegate(testAcc, addrVals[1], testAccCoins[0])
+	undelMsg := types.NewMsgUndelegate(testAcc1, goodVal, testCoins[0])
 
 	_, err = stakingMsgServer.Undelegate(context, undelMsg)
 	require.NoError(t, err)
 
 	// acc 2 undelegate
-	undelMsg = types.NewMsgUndelegate(testAcc2, addrVals[0], testAccCoins[0])
+	undelMsg = types.NewMsgUndelegate(testAcc2, evilVal, testCoins[0])
 
 	_, err = stakingMsgServer.Undelegate(context, undelMsg)
 	require.NoError(t, err)
 
-	validator, found := app.StakingKeeper.GetValidator(ctx, testVal)
+	// next block
+	ctx = BeginNewBlock(t, app, ctx, time.Duration(1))
+
+	// height 2
+	validator, found := app.StakingKeeper.GetValidator(ctx, evilVal)
 	require.True(t, found)
 	valAddrFancy, err := validator.GetConsAddr()
 	require.NoError(t, err)
-
-	fmt.Println(app.StakingKeeper.UnbondingTime(ctx))
-
-	// next block
-	// app.EndBlocker(ctx, abci.RequestEndBlock{Height: ctx.BlockHeight()})
-	// app.Commit()
-	ctx = BeginNewBlock(t, app, ctx, time.Duration(1))
-
-	// next block
-	// app.EndBlocker(ctx, abci.RequestEndBlock{Height: ctx.BlockHeight()})
-	// app.Commit()
-	ctx = BeginNewBlock(t, app, ctx, time.Duration(1))
-
-	// next block
-	// app.EndBlocker(ctx, abci.RequestEndBlock{Height: ctx.BlockHeight()})
-	// app.Commit()
-	ctx = BeginNewBlock(t, app, ctx, time.Duration(1))
 
 	app.SlashingKeeper.Slash(ctx, valAddrFancy, sdk.OneDec(), 20, 0)
 
@@ -219,68 +209,14 @@ func TestSlashRedelegation(t *testing.T) {
 	app.EndBlocker(ctx, abci.RequestEndBlock{Height: ctx.BlockHeight()})
 	app.Commit()
 
-	fmt.Println("acc 1", app.BankKeeper.GetBalance(ctx, testAcc, app.StakingKeeper.BondDenom(ctx)))
-	fmt.Println("acc 2", app.BankKeeper.GetBalance(ctx, testAcc2, app.StakingKeeper.BondDenom(ctx)))
+	acc1BalanceAfter := app.BankKeeper.GetBalance(ctx, testAcc1, app.StakingKeeper.BondDenom(ctx))
+	acc2BalanceAfter := app.BankKeeper.GetBalance(ctx, testAcc2, app.StakingKeeper.BondDenom(ctx))
 
-	// // add bonded tokens to pool for (re)delegations
-	// startCoins := sdk.NewCoins(sdk.NewInt64Coin(app.StakingKeeper.BondDenom(ctx), 15))
-	// bondedPool := app.StakingKeeper.GetBondedPool(ctx)
+	// acc 1 didn't get slashed
+	require.True(t, acc1BalanceAfter.Equal(acc1BalanceBefore))
 
-	// require.NoError(t, testutil.FundModuleAccount(app.BankKeeper, ctx, bondedPool.GetName(), startCoins))
-	// app.AccountKeeper.SetModuleAccount(ctx, bondedPool)
-
-	// // set a redelegation with an expiration timestamp beyond which the
-	// // redelegation shouldn't be slashed
-	// rd := types.NewRedelegation(addrDels[0], addrVals[0], addrVals[1], 0,
-	// 	time.Unix(5, 0), sdk.NewInt(10), sdk.NewDec(10))
-
-	// app.StakingKeeper.SetRedelegation(ctx, rd)
-
-	// // set the associated delegation
-	// del := types.NewDelegation(addrDels[0], addrVals[1], sdk.NewDec(10))
-	// app.StakingKeeper.SetDelegation(ctx, del)
-
-	// // started redelegating prior to the current height, stake didn't contribute to infraction
-	// validator, found := app.StakingKeeper.GetValidator(ctx, addrVals[1])
-	// require.True(t, found)
-	// slashAmount := app.StakingKeeper.SlashRedelegation(ctx, validator, rd, 1, fraction)
-	// require.True(t, slashAmount.Equal(sdk.NewInt(0)))
-
-	// // after the expiration time, no longer eligible for slashing
-	// ctx = ctx.WithBlockHeader(tmproto.Header{Time: time.Unix(10, 0)})
-	// app.StakingKeeper.SetRedelegation(ctx, rd)
-	// validator, found = app.StakingKeeper.GetValidator(ctx, addrVals[1])
-	// require.True(t, found)
-	// slashAmount = app.StakingKeeper.SlashRedelegation(ctx, validator, rd, 0, fraction)
-	// require.True(t, slashAmount.Equal(sdk.NewInt(0)))
-
-	// balances := app.BankKeeper.GetAllBalances(ctx, bondedPool.GetAddress())
-
-	// // test valid slash, before expiration timestamp and to which stake contributed
-	// ctx = ctx.WithBlockHeader(tmproto.Header{Time: time.Unix(0, 0)})
-	// app.StakingKeeper.SetRedelegation(ctx, rd)
-	// validator, found = app.StakingKeeper.GetValidator(ctx, addrVals[1])
-	// require.True(t, found)
-	// slashAmount = app.StakingKeeper.SlashRedelegation(ctx, validator, rd, 0, fraction)
-	// require.True(t, slashAmount.Equal(sdk.NewInt(5)))
-	// rd, found = app.StakingKeeper.GetRedelegation(ctx, addrDels[0], addrVals[0], addrVals[1])
-	// require.True(t, found)
-	// require.Len(t, rd.Entries, 1)
-
-	// // end block
-	// applyValidatorSetUpdates(t, ctx, app.StakingKeeper, 1)
-
-	// // initialbalance unchanged
-	// require.Equal(t, sdk.NewInt(10), rd.Entries[0].InitialBalance)
-
-	// // shares decreased
-	// del, found = app.StakingKeeper.GetDelegation(ctx, addrDels[0], addrVals[1])
-	// require.True(t, found)
-	// require.Equal(t, int64(5), del.Shares.RoundInt64())
-
-	// // pool bonded tokens should decrease
-	// burnedCoins := sdk.NewCoins(sdk.NewCoin(app.StakingKeeper.BondDenom(ctx), slashAmount))
-	// require.Equal(t, balances.Sub(burnedCoins...), app.BankKeeper.GetAllBalances(ctx, bondedPool.GetAddress()))
+	// acc 2 got slashed
+	require.True(t, acc2BalanceAfter.Amount.LT(acc2BalanceBefore.Amount))
 }
 
 // tests Slash at a future height (must panic)
